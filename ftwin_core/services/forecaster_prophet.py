@@ -63,3 +63,21 @@ def forecast_cashflow_prophet(entries: Iterable[LedgerEntry], config: ForecastCo
 
     return ForecastResult(config=config, monthly=months)
 
+
+def _fit_and_forecast_series(series: "pd.Series", periods: int) -> List[float]:
+    """Helper to forecast a single series with Prophet, used by ensemble."""
+    try:
+        from prophet import Prophet  # type: ignore
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("prophet is not installed; install prophet>=1.1") from exc
+
+    if series.empty:
+        return [0.0] * periods
+    monthly = series.reset_index()
+    monthly = monthly.rename(columns={monthly.columns[0]: "ds", monthly.columns[1]: "y"})
+    model = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+    model.fit(monthly)
+    future = model.make_future_dataframe(periods=periods, freq="MS", include_history=False)
+    forecast = model.predict(future)
+    return forecast["yhat"].clip(lower=0).tolist()
+

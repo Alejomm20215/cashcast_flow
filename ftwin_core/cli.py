@@ -13,9 +13,11 @@ from ftwin_core.domain.models import ForecastConfig, ForecastResult, SimulationC
 from ftwin_core.domain.models import MonthlyForecast  # noqa: E402
 from ftwin_core.io import config as config_io
 from ftwin_core.io import ledger as ledger_io
-from ftwin_core.services import forecaster, scenario as scenario_service
+from ftwin_core.services import forecaster, forecaster_ensemble, scenario as scenario_service
 from ftwin_core.services import forecaster_prophet
 from ftwin_core.services import simulator
+from ftwin_core.services import training
+from ftwin_core.services import suggestions
 
 app = typer.Typer(help="Financial Twin CLI for forecasting and simulation.")
 
@@ -150,6 +152,101 @@ def _spark_bar(p10: float, p50: float, p90: float, goal: Optional[float]) -> str
     return "".join(line)
 
 
+def _memory_path() -> Path:
+    return Path.home() / ".ftwin_memory.json"
+
+
+def _read_memory() -> Optional[dict]:
+    p = _memory_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return None
+    return None
+
+
+def _generate_suggestions(
+    income: float,
+    expense: float,
+    savings_rate: Optional[float],
+    lifestyle_creep: Optional[float],
+    horizon_months: int,
+    goal: Optional[float],
+    occupation: str,
+    breakdown: Optional[dict],
+    sim_result,
+    sim_conf: SimulationConfig,
+    inflation: float,
+) -> list[str]:
+    goal_gap = None
+    if goal is not None:
+        goal_gap = sim_result.percentiles["p50"][-1] - goal
+    ai_tips = []
+    try:
+        ai_tips = suggestions.generate_ai_suggestions(
+            net_monthly=income - expense,
+            p10=sim_result.percentiles["p10"][-1],
+            p50=sim_result.percentiles["p50"][-1],
+            p90=sim_result.percentiles["p90"][-1],
+            goal=goal,
+            goal_gap=goal_gap,
+            horizon_months=horizon_months,
+            return_mean=sim_conf.return_mean,
+            return_vol=sim_conf.return_vol,
+            shock_lambda=sim_conf.shock_lambda,
+            shock_mean=sim_conf.shock_mean,
+            inflation=inflation,
+            savings_rate=savings_rate,
+            lifestyle_creep=lifestyle_creep,
+            occupation=occupation,
+            breakdown=breakdown,
+        )
+    except Exception:
+        ai_tips = []
+    return ai_tips
+
+
+def _prompt_expense_breakdown(console: Console, base_spend: float):
+    console.print("[cyan]Enter monthly amounts (leave blank to skip a category).[/cyan]")
+    rent = typer.prompt("  Rent/mortgage", default="", show_default=False)
+    utilities = typer.prompt("  Utilities (power/water/internet)", default="", show_default=False)
+    groceries = typer.prompt("  Groceries", default="", show_default=False)
+    dining = typer.prompt("  Eating out / coffee", default="", show_default=False)
+    subs = typer.prompt("  Subscriptions (Netflix/Spotify/etc.)", default="", show_default=False)
+    transport = typer.prompt("  Transport", default="", show_default=False)
+    fun = typer.prompt("  Fun/parties/other", default="", show_default=False)
+
+    def to_val(v: str) -> float:
+        return float(v) if v.strip() else 0.0
+
+    total = sum(
+        [
+            to_val(rent),
+            to_val(utilities),
+            to_val(groceries),
+            to_val(dining),
+            to_val(subs),
+            to_val(transport),
+            to_val(fun),
+        ]
+    )
+    if total <= 0:
+        console.print("[yellow]Keeping previous spending amount.[/yellow]")
+        return base_spend, None
+    console.print(f"[green]Using category total: {total:,.2f}[/green]")
+    breakdown = {
+        "rent": to_val(rent),
+        "utilities": to_val(utilities),
+        "groceries": to_val(groceries),
+        "dining": to_val(dining),
+        "subscriptions": to_val(subs),
+        "transport": to_val(transport),
+        "fun": to_val(fun),
+    }
+    return total, breakdown
+
+
 def _build_constant_forecast(income: float, expense: float, months: int, annual_inflation: float):
     monthly = []
     inf_m = (1 + annual_inflation) ** (1 / 12) - 1
@@ -170,12 +267,15 @@ def forecast(
     months: int = typer.Option(12, help="Months to forecast"),
     annual_inflation: float = typer.Option(0.02, help="Annual inflation rate for expenses"),
     engine: str = typer.Option("naive", help="Forecaster engine: naive|prophet"),
+    ensemble: bool = typer.Option(False, help="Use ensemble forecaster (naive+prophet+arima)"),
     out: Optional[Path] = typer.Option(None, help="Output path for baseline forecast JSON"),
 ):
     """Generate baseline cashflow forecast."""
     entries = ledger_io.load_ledger(ledger)
     config = ForecastConfig(months=months, annual_inflation=annual_inflation)
-    if engine == "prophet":
+    if ensemble:
+        result = forecaster_ensemble.forecast_cashflow_ensemble(entries, config)
+    elif engine == "prophet":
         result = forecaster_prophet.forecast_cashflow_prophet(entries, config)
     else:
         result = forecaster.forecast_cashflow(entries, config)
@@ -193,6 +293,7 @@ def _load_forecast(
     months: int,
     annual_inflation: float,
     engine: str = "naive",
+    ensemble: bool = False,
 ):
     if baseline:
         with baseline.open("r", encoding="utf-8") as f:
@@ -201,10 +302,37 @@ def _load_forecast(
     if ledger:
         entries = ledger_io.load_ledger(ledger)
         config = ForecastConfig(months=months, annual_inflation=annual_inflation)
+        if ensemble:
+            return forecaster_ensemble.forecast_cashflow_ensemble(entries, config)
         if engine == "prophet":
             return forecaster_prophet.forecast_cashflow_prophet(entries, config)
         return forecaster.forecast_cashflow(entries, config)
     raise typer.BadParameter("Provide either --baseline or --ledger")
+
+
+@app.command()
+def train(
+    ledger: Path = typer.Option(..., help="CSV ledger with date,amount,category,kind"),
+):
+    """
+    Train per-user lightweight stats/models and store to local memory (~/.ftwin_memory.json).
+    """
+    entries = ledger_io.load_ledger(ledger)
+    memory = training.train_user_models(entries)
+    typer.echo(f"Trained and stored memory at {_memory_path()}")
+    typer.echo(json.dumps(memory, indent=2))
+
+
+@app.command()
+def memory():
+    """
+    Show stored per-user memory (if available).
+    """
+    mem = _read_memory()
+    if not mem:
+        typer.echo("No memory found. Run: ftwin train --ledger <file>")
+        return
+    typer.echo(json.dumps(mem, indent=2))
 
 
 @app.command()
@@ -214,6 +342,7 @@ def simulate(
     months: int = typer.Option(12, help="Months to forecast if ledger is used"),
     annual_inflation: float = typer.Option(0.02, help="Annual inflation rate if ledger is used"),
     engine: str = typer.Option("naive", help="Forecaster engine when using ledger: naive|prophet"),
+    ensemble: bool = typer.Option(False, help="Use ensemble forecaster when using ledger"),
     paths: int = typer.Option(5000, help="Monte Carlo paths"),
     return_mean: float = typer.Option(0.07, help="Annual return mean"),
     return_vol: float = typer.Option(0.15, help="Annual return volatility"),
@@ -228,7 +357,7 @@ def simulate(
     out: Optional[Path] = typer.Option(None, help="Output path for simulation JSON"),
 ):
     """Run Monte Carlo simulation on baseline."""
-    forecast_result = _load_forecast(baseline, ledger, months, annual_inflation, engine)
+    forecast_result = _load_forecast(baseline, ledger, months, annual_inflation, engine, ensemble)
     sim_config = SimulationConfig(
         horizon_months=months,
         paths=paths,
@@ -260,6 +389,7 @@ def scenario(
     months: int = typer.Option(12, help="Months to forecast if ledger is used"),
     annual_inflation: float = typer.Option(0.02, help="Annual inflation rate if ledger is used"),
     engine: str = typer.Option("naive", help="Forecaster engine when using ledger: naive|prophet"),
+    ensemble: bool = typer.Option(False, help="Use ensemble forecaster when using ledger"),
     paths: int = typer.Option(5000, help="Monte Carlo paths"),
     return_mean: float = typer.Option(0.07, help="Annual return mean"),
     return_vol: float = typer.Option(0.15, help="Annual return volatility"),
@@ -309,11 +439,61 @@ def interactive():
     console.print("[bold cyan]Financial Twin Quick Simulation[/bold cyan]\n")
 
     state = _load_state()
+    mem = _read_memory()
 
-    monthly_income = typer.prompt("Monthly take-home income", type=float)
-    monthly_expense = typer.prompt("Monthly spending (all-in)", type=float)
+    # If no memory, ask a few questions to generate it quickly
+    if not mem:
+        console.print("[yellow]No profile found. Let's capture a quick profile to personalize defaults.[/yellow]")
+        months_history = typer.prompt("How many months of history do you roughly have?", default=12, type=int)
+        est_income = typer.prompt("Rough average monthly income?", type=float)
+        est_expense = typer.prompt("Rough average monthly spending (all-in)?", type=float)
+        est_savings_rate = typer.prompt("Rough savings rate (e.g., 0.1 = 10%, blank if unsure)", default="", show_default=False)
+        est_creep = typer.prompt("Do you usually spend more when income rises? (0-1, blank if unsure)", default="", show_default=False)
+
+        sr_val = _parse_rate(est_savings_rate) if est_savings_rate.strip() else max((est_income - est_expense) / est_income, 0) if est_income else 0.0
+        creep_val = _parse_rate(est_creep) if est_creep.strip() else 0.0
+
+        quick_mem = {
+            "savings_rate": sr_val,
+            "lifestyle_creep": creep_val,
+            "categories": {},
+            "months_observed": months_history,
+            "est_income": est_income,
+            "est_expense": est_expense,
+            "meta": {"source": "quick_profile"},
+        }
+        _memory_path().write_text(json.dumps(quick_mem, indent=2))
+        mem = quick_mem
+        console.print("[green]Profile stored locally. You can refine it later with ftwin train --ledger <file>.[/green]")
+    else:
+        console.print(
+            f"Loaded your profile: savings_rate ~{mem.get('savings_rate', 0)*100:.0f}%, "
+            f"lifestyle_creep ~{mem.get('lifestyle_creep', 0)*100:.0f}%"
+        )
+
+    default_income = mem.get("est_income") if mem else None
+    default_expense = mem.get("est_expense") if mem else None
+
+    monthly_income = typer.prompt(
+        "Monthly take-home income",
+        default=default_income if default_income else None,
+        type=float,
+    )
+    monthly_expense = typer.prompt(
+        "Monthly spending (all-in)",
+        default=default_expense if default_expense else None,
+        type=float,
+    )
+
+    # Optional category breakdown
+    if typer.confirm("Add a quick breakdown (rent/utilities/food/dining/subscriptions/fun)?", default=False):
+        monthly_expense, breakdown = _prompt_expense_breakdown(console, base_spend=monthly_expense)
+    else:
+        breakdown = None
+
     country = typer.prompt("Country (for inflation)", default=state.get("country", "US"))
     months = typer.prompt("Months to simulate", default=state.get("months", 12), type=int)
+    occupation = typer.prompt("Your field/role (optional, e.g., psychologist/programmer)", default="", show_default=False)
 
     start_wealth_in = typer.prompt("Current savings (type a number, blank = 0)", default="", show_default=False)
     start_wealth = float(start_wealth_in) if start_wealth_in.strip() else 0.0
@@ -323,7 +503,16 @@ def interactive():
     console.print("  [green]2[/green] Balanced (6% return, 10% vol)")
     console.print("  [green]3[/green] Aggressive (10% return, 18% vol)")
     console.print("  [green]0[/green] Custom (enter your own)")
-    preset_choice = typer.prompt("Choose preset (0-3)", default=str(state.get("preset_choice", "0")))
+    default_preset = str(state.get("preset_choice", "0"))
+    if mem and "savings_rate" in mem:
+        sr = mem["savings_rate"]
+        if sr < 0.05:
+            default_preset = "1"
+        elif sr < 0.15:
+            default_preset = "2"
+        else:
+            default_preset = "2"
+    preset_choice = typer.prompt("Choose preset (0-3)", default=default_preset)
 
     preset_map = {
         "1": (0.02, 0.0),
@@ -463,6 +652,28 @@ def interactive():
             "shock_choice": shock_choice,
         }
     )
+
+    # Extra suggestions
+    ai_tips = _generate_suggestions(
+        income=monthly_income,
+        expense=monthly_expense,
+        savings_rate=mem.get("savings_rate") if mem else None,
+        lifestyle_creep=mem.get("lifestyle_creep") if mem else None,
+        horizon_months=months,
+        goal=goal_val,
+        occupation=occupation,
+        breakdown=breakdown,
+        sim_result=result,
+        sim_conf=sim_conf,
+        inflation=inflation,
+    )
+    if ai_tips:
+        console.print("[bold magenta]AI-personalized ideas:[/bold magenta]")
+        for s in ai_tips:
+            console.print(f"- {s}")
+        console.print()
+    else:
+        console.print("[yellow]AI suggestions unavailable (set HF_TOKEN to enable).[/yellow]")
 
 
 if __name__ == "__main__":

@@ -11,4 +11,8 @@ redis>=5.0
 prophet>=1.1
 pytest>=8.0
 rich>=13.7
+statsmodels>=0.14
+scikit-learn>=1.5
+langchain>=0.3
+langchain-community>=0.3
 
