@@ -1,0 +1,12 @@
+-e .
+django>=5.0
+djangorestframework>=3.15
+typer>=0.12
+pydantic>=2.7
+pandas>=2.2
+numpy>=1.26
+scipy>=1.11
+celery>=5.3
+redis>=5.0
+prophet>=1.1
+

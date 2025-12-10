@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ftwin-core"
+version = "0.1.0"
+description = "Financial Twin CLI and core services for forecasting and Monte Carlo simulation."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Your Team" }]
+dependencies = [
+  "typer>=0.12",
+  "pydantic>=2.7",
+  "pandas>=2.2",
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "django>=5.0",
+  "djangorestframework>=3.15",
+  "celery>=5.3",
+  "redis>=5.0",
+  "prophet>=1.1",
+]
+
+[project.scripts]
+ftwin = "ftwin_core.cli:app"
+
