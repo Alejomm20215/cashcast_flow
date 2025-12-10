@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from ftwin_core.domain.models import ForecastConfig, ForecastResult, SimulationConfig
 from ftwin_core.domain.models import MonthlyForecast  # noqa: E402
@@ -107,6 +109,45 @@ def _parse_rate(raw: str) -> float:
     except ValueError:
         return 0.0
     return val / 100.0 if val > 1 else val
+
+
+def _state_path() -> Path:
+    return Path.home() / ".ftwin_interactive.json"
+
+
+def _load_state() -> dict:
+    p = _state_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_state(payload: dict) -> None:
+    try:
+        _state_path().write_text(json.dumps(payload, indent=2))
+    except Exception:
+        pass
+
+
+def _spark_bar(p10: float, p50: float, p90: float, goal: Optional[float]) -> str:
+    """
+    Build a tiny bar to visualize spread.
+    """
+    markers = {"p10": p10, "p50": p50, "p90": p90}
+    max_val = max([p90, p50, p10, goal or 0, 1])
+    width = 30
+    def pos(v: float) -> int:
+        return min(width - 1, int((v / max_val) * (width - 1)))
+    line = [" "] * width
+    line[pos(p10)] = "▏"
+    line[pos(p50)] = "▌"
+    line[pos(p90)] = "█"
+    if goal is not None:
+        line[pos(goal)] = "↑"
+    return "".join(line)
 
 
 def _build_constant_forecast(income: float, expense: float, months: int, annual_inflation: float):
@@ -264,29 +305,48 @@ def interactive():
     """
     Interactive mode: simple questions, quick simulation (no JSON needed).
     """
-    typer.echo("Financial Twin Quick Simulation\n")
+    console = Console()
+    console.print("[bold cyan]Financial Twin Quick Simulation[/bold cyan]\n")
+
+    state = _load_state()
 
     monthly_income = typer.prompt("Monthly take-home income", type=float)
     monthly_expense = typer.prompt("Monthly spending (all-in)", type=float)
-    country = typer.prompt("Country (for inflation)", default="US")
-    months = typer.prompt("Months to simulate", default=12, type=int)
+    country = typer.prompt("Country (for inflation)", default=state.get("country", "US"))
+    months = typer.prompt("Months to simulate", default=state.get("months", 12), type=int)
 
     start_wealth_in = typer.prompt("Current savings (type a number, blank = 0)", default="", show_default=False)
     start_wealth = float(start_wealth_in) if start_wealth_in.strip() else 0.0
 
-    expected_return_in = typer.prompt(
-        "Expected annual growth on savings/investments (e.g., 0.05 = 5%, blank = 0%)",
-        default="",
-        show_default=False,
-    )
-    expected_return = _parse_rate(expected_return_in)
+    console.print("\nGrowth presets (optional):")
+    console.print("  [green]1[/green] Cash-like (2% return, 0% vol)")
+    console.print("  [green]2[/green] Balanced (6% return, 10% vol)")
+    console.print("  [green]3[/green] Aggressive (10% return, 18% vol)")
+    console.print("  [green]0[/green] Custom (enter your own)")
+    preset_choice = typer.prompt("Choose preset (0-3)", default=str(state.get("preset_choice", "0")))
 
-    expected_vol_in = typer.prompt(
-        "Expected annual volatility (e.g., 0.10 = 10%, blank = 0%)",
-        default="",
-        show_default=False,
-    )
-    expected_vol = _parse_rate(expected_vol_in)
+    preset_map = {
+        "1": (0.02, 0.0),
+        "2": (0.06, 0.10),
+        "3": (0.10, 0.18),
+    }
+    if preset_choice in preset_map:
+        expected_return, expected_vol = preset_map[preset_choice]
+        console.print(f"Using preset: return {expected_return*100:.1f}%, vol {expected_vol*100:.1f}%")
+    else:
+        expected_return_in = typer.prompt(
+            "Expected annual growth on savings/investments (e.g., 0.05 = 5%, blank = 0%)",
+            default="",
+            show_default=False,
+        )
+        expected_return = _parse_rate(expected_return_in)
+
+        expected_vol_in = typer.prompt(
+            "Expected annual volatility (e.g., 0.10 = 10%, blank = 0%)",
+            default="",
+            show_default=False,
+        )
+        expected_vol = _parse_rate(expected_vol_in)
 
     goal_target = typer.prompt("Goal at end (blank = skip)", default="", show_default=False)
     goal_val = float(goal_target) if goal_target.strip() else None
@@ -294,8 +354,19 @@ def interactive():
     liquidity_val = typer.prompt("Liquidity floor (blank = skip)", default="", show_default=False)
     liquidity_floor = float(liquidity_val) if liquidity_val.strip() else None
 
+    # Shocks
+    console.print("\nUnexpected expense risk (shocks): 0=None, 1=Low, 2=Med, 3=High")
+    shock_choice = typer.prompt("Choose shock level (0-3)", default=str(state.get("shock_choice", "0")))
+    shock_map = {
+        "0": (0.0, 0.0),
+        "1": (0.05, 100.0),
+        "2": (0.15, 200.0),
+        "3": (0.25, 400.0),
+    }
+    shock_lambda, shock_mean = shock_map.get(shock_choice, (0.0, 0.0))
+
     inflation = _default_inflation_for_country(country)
-    typer.echo(f"Using annual inflation {inflation*100:.2f}% for '{country}'.")
+    console.print(f"Using annual inflation [bold]{inflation*100:.2f}%[/bold] for '{country}'.")
 
     forecast = _build_constant_forecast(
         income=monthly_income,
@@ -310,13 +381,20 @@ def interactive():
         paths=2000,
         return_mean=expected_return,
         return_vol=expected_vol,
-        shock_lambda=0.0,
-        shock_mean=0.0,
+        shock_lambda=shock_lambda,
+        shock_mean=shock_mean,
         start_wealth=start_wealth,
         goal_target=goal_val,
         liquidity_floor=liquidity_floor,
     )
-    result = simulator.run_monte_carlo(forecast, sim_conf)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Running simulation...", total=None)
+        result = simulator.run_monte_carlo(forecast, sim_conf)
+        progress.update(task, advance=1)
 
     # Summary output
     net_monthly = monthly_income - monthly_expense
@@ -324,48 +402,67 @@ def interactive():
     p50_final = result.percentiles["p50"][-1]
     p90_final = result.percentiles["p90"][-1]
 
-    typer.secho("\n=== Quick Forecast ===", fg="cyan")
-    typer.echo(f"Horizon: {months} months | Paths: {sim_conf.paths}")
-    typer.echo(
-        f"Assumptions: return {expected_return*100:.1f}%/yr, vol {expected_vol*100:.1f}%/yr, shocks 0%, "
-        f"expense inflation {inflation*100:.2f}%/yr"
+    console.print("\n[bold cyan]== Quick Forecast ==[/bold cyan]")
+    console.print(f"Horizon: {months} months | Paths: {sim_conf.paths}")
+    console.print(
+        f"Assumptions: return [bold]{expected_return*100:.1f}%[/bold]/yr, vol [bold]{expected_vol*100:.1f}%[/bold]/yr, "
+        f"shocks λ={shock_lambda:.2f}, mean={shock_mean:,.0f}, expense inflation [bold]{inflation*100:.2f}%[/bold]/yr"
     )
-    typer.echo(f"Avg monthly save/burn: {net_monthly:,.2f}")
-    typer.echo(f"Final wealth (approx): P10={p10_final:,.0f}, P50={p50_final:,.0f}, P90={p90_final:,.0f}")
+    console.print(f"Avg monthly save/burn: [bold]{net_monthly:,.2f}[/bold]")
+    console.print(
+        f"Final wealth (approx): P10=[yellow]{p10_final:,.0f}[/yellow], "
+        f"P50=[green]{p50_final:,.0f}[/green], P90=[cyan]{p90_final:,.0f}[/cyan]"
+    )
+    console.print(f"Spread bar: { _spark_bar(p10_final, p50_final, p90_final, goal_val) }")
 
     if goal_val is not None:
         goal_gap = p50_final - goal_val
-        typer.echo(f"Goal: {goal_val:,.0f} | Median end wealth: {p50_final:,.0f} | Gap: {goal_gap:,.0f}")
+        console.print(
+            f"Goal: {goal_val:,.0f} | Median end wealth: {p50_final:,.0f} | Gap: "
+            f"{('[green]' if goal_gap >=0 else '[red]')}{goal_gap:,.0f}[/]"
+        )
     if result.goal_success_prob is not None:
         prob = result.goal_success_prob * 100
         if prob == 0:
-            typer.secho(
-                "Goal reach chance: 0% (given current income/spend, inflation, and return assumptions, the goal sits above the forecast path).",
-                fg="yellow",
+            console.print(
+                "[yellow]Goal reach chance: 0% (goal sits above the forecast path with current income/spend and growth).[/yellow]"
             )
         else:
-            typer.echo(f"Goal reach chance: {prob:.1f}%")
+            console.print(f"Goal reach chance: [bold]{prob:.1f}%[/bold]")
 
     if result.liquidity_breach_prob is not None:
-        typer.echo(f"Chance of dropping below floor: {result.liquidity_breach_prob*100:.1f}%")
-    typer.secho("----------------", fg="cyan")
+        console.print(f"Chance of dropping below floor: [bold]{result.liquidity_breach_prob*100:.1f}%[/bold]")
+    console.print("[bold cyan]----------------[/bold cyan]")
 
     # Guidance
-    typer.secho("\nTip:", fg="green")
+    console.print("\n[green]Tip:[/green]")
     if goal_val is not None and goal_val > 0:
-        needed_net = (goal_val - start_wealth) / months if months > 0 else 0
-        delta = needed_net - net_monthly
-        if delta > 0:
-            typer.echo(
-                f"To be on track for the goal without growth, you'd need about {needed_net:,.0f}/mo net; "
-                f"that's {delta:,.0f} more per month than now."
-            )
+        r_m = expected_return / 12
+        annuity = ((1 + r_m) ** months - 1) / r_m if r_m != 0 else months
+        deterministic_end = start_wealth * (1 + r_m) ** months + net_monthly * annuity
+        gap = goal_val - deterministic_end
+        if gap <= 0:
+            console.print("Your current plan (median) is enough to reach the goal in expectation.")
         else:
-            typer.echo("Your current net/month is sufficient to hit the goal in a straight-line scenario.")
+            needed_extra = gap / annuity if annuity > 0 else gap / max(months, 1)
+            console.print(
+                f"To reach the goal in expectation, add about [bold]{needed_extra:,.0f}/mo[/bold] net "
+                f"(or extend horizon / increase return)."
+            )
     else:
-        typer.echo("Add a goal to see how far off you are, or adjust return/volatility for growth assumptions.")
+        console.print("Add a goal to see how far off you are, or adjust return/volatility for growth assumptions.")
 
-    typer.secho("\nDone.\n", fg="cyan")
+    console.print("\n[bold cyan]Done.[/bold cyan]\n")
+
+    # Save state
+    _save_state(
+        {
+            "country": country,
+            "months": months,
+            "preset_choice": preset_choice,
+            "shock_choice": shock_choice,
+        }
+    )
 
 
 if __name__ == "__main__":
