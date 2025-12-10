@@ -22,6 +22,14 @@ dependencies = [
   "prophet>=1.1",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["ftwin_core", "ftwin_core.*"]
+
 [project.scripts]
 ftwin = "ftwin_core.cli:app"
 

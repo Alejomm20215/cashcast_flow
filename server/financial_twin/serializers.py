@@ -18,6 +18,9 @@ class SimulationRequestSerializer(serializers.Serializer):
     inflation_std = serializers.FloatField(default=0.01)
     shock_lambda = serializers.FloatField(default=0.1)
     shock_mean = serializers.FloatField(default=200.0)
+    start_wealth = serializers.FloatField(default=0.0)
+    goal_target = serializers.FloatField(required=False, allow_null=True)
+    liquidity_floor = serializers.FloatField(required=False, allow_null=True)
     seed = serializers.IntegerField(required=False)
 
 

@@ -5,10 +5,15 @@ CLI-first package for forecasting cashflow, running Monte Carlo simulations, and
 ## Quick CLI usage
 - Baseline (naive): `ftwin forecast --ledger data/ledger.csv --months 12 --out baseline.json`
 - Baseline (Prophet): `ftwin forecast --ledger data/ledger.csv --engine prophet --out baseline.json`
-- Simulate: `ftwin simulate --baseline baseline.json --paths 5000 --out sim.json`
+- Simulate: `ftwin simulate --baseline baseline.json --paths 5000 --start-wealth 0 --goal-target 50000 --liquidity-floor 0 --out sim.json`
 - Scenario: `ftwin scenario --delta delta.json --baseline baseline.json --out scen.json`
 
 Ledger CSV requires columns: `date,amount,category,kind` where `kind` is `income|expense`.
+
+Metrics returned:
+- `percentiles` (p10/p50/p90 wealth over time)
+- `goal_success_prob` (probability final wealth >= goal_target if provided)
+- `liquidity_breach_prob` (probability wealth dips below liquidity_floor at any step)
 
 ## Django API
 - POST `/api/simulations/` with multipart `{ledger: file, months, ...}` → returns run id (async Celery job).

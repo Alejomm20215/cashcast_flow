@@ -64,6 +64,9 @@ def run_simulation(run_id: int):
             inflation_std=float(cfg.get("inflation_std", 0.01)),
             shock_lambda=float(cfg.get("shock_lambda", 0.1)),
             shock_mean=float(cfg.get("shock_mean", 200.0)),
+            start_wealth=float(cfg.get("start_wealth", 0.0)),
+            goal_target=cfg.get("goal_target"),
+            liquidity_floor=cfg.get("liquidity_floor"),
             seed=cfg.get("seed"),
         )
 
@@ -72,6 +75,7 @@ def run_simulation(run_id: int):
             "percentiles": result.percentiles,
             "config": vars(result.config),
             "goal_success_prob": result.goal_success_prob,
+            "liquidity_breach_prob": result.liquidity_breach_prob,
         }
         result_path = _write_result(run.id, payload)
 

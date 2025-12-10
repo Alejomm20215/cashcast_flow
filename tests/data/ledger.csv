@@ -1,0 +1,5 @@
+date,amount,category,kind
+2024-01-01,3000,salary,income
+2024-01-05,-500,rent,expense
+2024-02-01,3000,salary,income
+2024-02-05,-500,rent,expense

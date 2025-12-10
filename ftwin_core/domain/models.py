@@ -61,6 +61,9 @@ class SimulationConfig:
     inflation_std: float = 0.01
     shock_lambda: float = 0.1
     shock_mean: float = 200.0
+    start_wealth: float = 0.0
+    goal_target: Optional[float] = None
+    liquidity_floor: Optional[float] = None
     seed: Optional[int] = None
 
 
@@ -76,6 +79,7 @@ class SimulationResult:
     config: SimulationConfig
     percentiles: Dict[str, List[float]]  # keys like "p10","p50","p90"
     goal_success_prob: Optional[float] = None
+    liquidity_breach_prob: Optional[float] = None
 
     def snapshot(self) -> Dict[str, List[float]]:
         return self.percentiles

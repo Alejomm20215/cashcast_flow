@@ -22,9 +22,10 @@ def run_monte_carlo(forecast: ForecastResult, config: SimulationConfig) -> Simul
     shocks = np.random.poisson(config.shock_lambda, size=(config.paths, horizon)) * config.shock_mean
 
     wealth = np.zeros((config.paths, horizon))
+    wealth[:, 0] = config.start_wealth
 
     for t in range(horizon):
-        prev = wealth[:, t - 1] if t > 0 else np.zeros(config.paths)
+        prev = wealth[:, t - 1] if t > 0 else wealth[:, 0]
         wealth[:, t] = prev * (1 + returns[:, t]) + nets[t] - shocks[:, t]
 
     percentiles = {
@@ -33,5 +34,19 @@ def run_monte_carlo(forecast: ForecastResult, config: SimulationConfig) -> Simul
         "p90": np.percentile(wealth, 90, axis=0).tolist(),
     }
 
-    return SimulationResult(config=config, percentiles=percentiles, goal_success_prob=None)
+    goal_success_prob = None
+    if config.goal_target is not None:
+        goal_success_prob = float(np.mean(wealth[:, -1] >= config.goal_target))
+
+    liquidity_breach_prob = None
+    if config.liquidity_floor is not None:
+        breaches = (wealth < config.liquidity_floor).any(axis=1)
+        liquidity_breach_prob = float(np.mean(breaches))
+
+    return SimulationResult(
+        config=config,
+        percentiles=percentiles,
+        goal_success_prob=goal_success_prob,
+        liquidity_breach_prob=liquidity_breach_prob,
+    )
 

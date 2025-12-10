@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.venv/
+pip-wheel-metadata/
+*.egg-info/
+
+# Django / app
+db.sqlite3
+media/
+
+# Node / general
+node_modules/
+
+# Tooling
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.idea/
+.vscode/
+
+# Build / dist
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+
